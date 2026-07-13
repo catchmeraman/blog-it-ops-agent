@@ -1,128 +1,102 @@
-# Building an Intelligent IT Operations Agent on Amazon Bedrock AgentCore Runtime
-
-## A 300-Level Deep Dive into Production-Grade AIOps with Automated Remediation
-
----
+# How I Built an IT Operations Agent That Actually Fixes Things (Not Just Reports Them)
 
 > **Level**: 300 (Advanced) | **Services**: Amazon Bedrock AgentCore, CloudWatch, SSM, EC2, CodePipeline, CodeBuild  
 > **Time to Build**: 4-6 hours | **Region**: us-east-1
 
 ---
 
-## Table of Contents
+## The Problem That Kept Me Up at Night
 
-1. [Introduction](#introduction)
-2. [Architecture Overview](#architecture-overview)
-3. [Prerequisites](#prerequisites)
-4. [IAM Role Setup](#step-1-create-the-iam-execution-role)
-5. [Agent Code Implementation](#step-3-agent-code-implementation)
-6. [Deploying to AgentCore Runtime](#step-4-package-your-agent-code)
-7. [CI/CD Pipeline](#part-4-cicd-pipeline-for-continuous-agent-deployment)
-8. [Testing & Validation](#testing-the-agent)
-9. [Operational Monitoring](#operational-metrics--monitoring)
-10. [Lessons Learned & Conclusion](#lessons-learned)
+I manage infrastructure for a growing team, and honestly, I was drowning. Every morning started the same way — wake up, check Slack, find 15 CloudWatch alarms fired overnight, spend 2 hours figuring out what went wrong, SSH into boxes, restart services, and pray it doesn't happen again.
+
+The worst part? 80% of these incidents followed the same pattern. High memory? Find the runaway process, kill it, restart the service. Disk full? Clear old logs. CPU spike after a deployment? Roll it back. I was basically a human runbook executor.
+
+So I thought — what if I could build an agent that doesn't just *tell* me something is wrong (I have CloudWatch for that), but actually *investigates* the issue and *fixes* it? That's how **it_ops_agent_v2** was born.
 
 ---
 
-## Introduction
+## What I Built
 
-Modern IT operations teams face an ever-growing challenge: infrastructure complexity scales exponentially while team size remains constant. Traditional runbook-based approaches cannot keep pace with the volume and velocity of operational incidents across hybrid cloud environments.
+My IT Ops Agent runs on **Amazon Bedrock AgentCore Runtime** and it can:
 
-In this blog post, we walk through how we built **it_ops_agent_v2** — a production-grade IT Operations Agent deployed on **Amazon Bedrock AgentCore Runtime** that can:
+- 🔍 **Diagnose** — Pulls CloudWatch metrics, searches logs, checks CloudTrail for who changed what
+- 🔧 **Fix** — Runs SSM commands on instances, reboots boxes, manages security groups
+- 📢 **Alert** — Sends SNS notifications to my team with what it found and what it did
+- 📖 **Learn** — Queries our internal runbook Knowledge Base for SOPs before acting
 
-- **Diagnose** infrastructure issues using CloudWatch metrics, logs, and CloudTrail events
-- **Remediate** common problems via AWS Systems Manager (SSM) run commands
-- **Manage** EC2 instances (reboot, stop/start, security group modifications)
-- **Alert** teams through SNS notifications
-- **Query** an internal knowledge base for runbook guidance using Amazon Bedrock Knowledge Bases
-
-This agent has been running in production since March 2026, currently at **version 6**, serving requests through a custom endpoint with a fully automated CI/CD pipeline for updates.
+It's been running since March 2026. I've iterated through **6 versions** in production, and I deploy updates with a simple `git push`. Let me show you how I built it.
 
 ---
 
-## Architecture Overview
+## Architecture — How It All Fits Together
 
 ![IT Ops Agent Architecture](generated-diagrams/it-ops-agent-architecture.png)
 
+Here's the high-level view of what I ended up with:
+
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        IT Ops Agent Architecture                      │
+│                    My IT Ops Agent Architecture                       │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                       │
 │  ┌──────────────┐     ┌─────────────────────────────────────┐       │
-│  │   User /     │     │   Amazon Bedrock AgentCore Runtime   │       │
-│  │   Event      │────▶│                                     │       │
-│  │   Trigger    │     │   ┌─────────────────────────────┐   │       │
+│  │  Me / Alarm  │     │   Amazon Bedrock AgentCore Runtime   │       │
+│  │  / Event     │────▶│                                     │       │
+│  │  Trigger     │     │   ┌─────────────────────────────┐   │       │
 │  └──────────────┘     │   │     it_ops_agent_v2         │   │       │
-│                        │   │   (Strands Agent Framework)  │   │       │
-│                        │   │                             │   │       │
-│                        │   │   ┌─────────┐ ┌─────────┐  │   │       │
-│                        │   │   │ Tools   │ │  LLM    │  │   │       │
-│                        │   │   └────┬────┘ └────┬────┘  │   │       │
-│                        │   └────────┼───────────┼────────┘   │       │
-│                        └────────────┼───────────┼────────────┘       │
-│                                     │           │                     │
-│  ┌──────────────────────────────────┼───────────┼──────────────────┐ │
-│  │              AWS Services        │           │                  │ │
-│  │                                  ▼           ▼                  │ │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐   │ │
-│  │  │CloudWatch│  │CloudTrail│  │   SSM    │  │ Bedrock FM   │   │ │
-│  │  │Metrics & │  │  Events  │  │Run Cmds  │  │Claude 3.5    │   │ │
-│  │  │  Logs    │  │          │  │          │  │Sonnet v2     │   │ │
-│  │  └──────────┘  └──────────┘  └──────────┘  └──────────────┘   │ │
-│  │                                                                 │ │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐   │ │
-│  │  │   EC2    │  │   SNS    │  │   EKS    │  │ Bedrock KB   │   │ │
-│  │  │ Manage   │  │ Alerts   │  │ Cluster  │  │ (Runbooks)   │   │ │
-│  │  │          │  │          │  │  Info    │  │              │   │ │
-│  │  └──────────┘  └──────────┘  └──────────┘  └──────────────┘   │ │
-│  └─────────────────────────────────────────────────────────────────┘ │
+│                        │   │   (Strands + Claude 3.5)    │   │       │
+│                        │   └─────────────────────────────┘   │       │
+│                        └─────────────────────────────────────┘       │
+│                                     │                                 │
+│  ┌──────────────────────────────────┼────────────────────────────┐   │
+│  │  What it talks to:              │                             │   │
+│  │                                  ▼                             │   │
+│  │  CloudWatch ─ CloudTrail ─ SSM ─ EC2 ─ SNS ─ EKS ─ KB       │   │
+│  └───────────────────────────────────────────────────────────────┘   │
 │                                                                       │
-│  ┌─────────────────────────────────────────────────────────────────┐ │
-│  │                    CI/CD Pipeline                                │ │
-│  │  CodeCommit ──▶ CodeBuild ──▶ S3 Upload ──▶ AgentCore Update    │ │
-│  └─────────────────────────────────────────────────────────────────┘ │
+│  ┌───────────────────────────────────────────────────────────────┐   │
+│  │  CI/CD: CodeCommit → CodeBuild → S3 → AgentCore Update       │   │
+│  └───────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Key Architecture Decisions
+### Why I Made These Choices
 
-1. **AgentCore Runtime over Lambda**: We chose AgentCore Runtime for its session persistence (up to 8 hours), eliminating cold starts for multi-turn diagnostic conversations.
-2. **Strands Agent Framework**: Provides a clean tool-use pattern with Claude 3.5 Sonnet v2 as the reasoning engine.
-3. **Public Network Mode**: The agent operates in PUBLIC network mode for simplicity, with IAM-based access control securing the endpoint.
-4. **Immutable Versioning**: Each deployment creates a new immutable version (currently v6), enabling instant rollbacks.
+**Why AgentCore Runtime instead of Lambda?**  
+My debugging sessions are conversational. I ask the agent "what's wrong?", it investigates, I say "fix it", it does. That multi-turn flow needs session persistence. AgentCore gives me up to 8 hours per session with a 15-minute idle timeout. Lambda would've been a nightmare for this.
+
+**Why Strands Agent Framework?**  
+I tried building raw tool-calling logic myself. Don't. Strands handles the tool loop cleanly — I just define tools as Python functions and the framework handles routing, retries, and the conversation flow with Claude.
+
+**Why PUBLIC network mode?**  
+I know, I know — "private is safer." But for my use case, IAM authentication secures the endpoint, and I didn't want to deal with VPC configurations slowing me down. I can always tighten this later.
+
+---
+
+## What You'll Need Before Starting
+
+| Requirement | Why |
+|-------------|-----|
+| AWS Account with Bedrock access | Claude 3.5 Sonnet v2 must be enabled |
+| AgentCore Runtime access | It's in the Bedrock console |
+| Python 3.12+ | For the agent code |
+| AWS CLI v2 | For deploying |
+| An S3 bucket | I used `event-agent-kb-114805761158` |
+| Some EC2 instances to manage | So the agent has something to work with |
 
 > 📸 **Screenshot Placeholder**: AgentCore Runtime Dashboard  
 > ![AgentCore Runtime Dashboard](screenshots/01-agentcore-runtime-dashboard.png)  
-> *Navigate to: Amazon Bedrock Console → AgentCore → Runtimes*
+> *My runtime list showing it_ops_agent_v2 at version 6, status READY*
 
 ---
 
-## Prerequisites
+## Setting Up IAM (The Boring But Critical Part)
 
-| Requirement | Details |
-|-------------|---------|
-| AWS Account | With access to Amazon Bedrock (Claude 3.5 Sonnet v2 enabled) |
-| AgentCore Runtime | Access to Amazon Bedrock AgentCore service |
-| IAM Role | With trust policy for `bedrock-agentcore.amazonaws.com` |
-| Python 3.12+ | For the agent code |
-| AWS CLI v2 | Configured with appropriate credentials |
-| S3 Bucket | For storing agent code packages |
-| Bedrock Knowledge Base | (Optional) For runbook retrieval |
+First thing — the agent needs permissions to actually *do stuff*. I spent more time on IAM than I'd like to admit. Here's what I landed on.
 
-### Service Quotas to Verify
+### The Trust Policy
 
-- Bedrock AgentCore Runtime: Default limit of 10 runtimes per account
-- Bedrock model access: Claude 3.5 Sonnet v2 must be enabled in your region
-- SSM: Ensure target EC2 instances have SSM Agent installed and running
-
----
-
-## Step 1: Create the IAM Execution Role
-
-The AgentCore Runtime needs an IAM role that it can assume to execute your agent's operations.
-
-### Trust Policy (`trust-policy.json`)
+AgentCore needs to assume your role. I also added `bedrock.amazonaws.com` and `ec2.amazonaws.com` because my agent calls Bedrock models and sometimes needs EC2 context.
 
 ```json
 {
@@ -141,9 +115,7 @@ The AgentCore Runtime needs an IAM role that it can assume to execute your agent
     },
     {
       "Effect": "Allow",
-      "Principal": {
-        "AWS": "arn:aws:iam::<ACCOUNT_ID>:root"
-      },
+      "Principal": { "AWS": "arn:aws:iam::<YOUR_ACCOUNT_ID>:root" },
       "Action": "sts:AssumeRole"
     }
   ]
@@ -153,19 +125,14 @@ The AgentCore Runtime needs an IAM role that it can assume to execute your agent
 ```bash
 aws iam create-role \
   --role-name it-ops-agent-role \
-  --assume-role-policy-document file://trust-policy.json \
-  --description "Execution role for IT Ops Agent on AgentCore Runtime"
+  --assume-role-policy-document file://trust-policy.json
 ```
 
-> 📸 **Screenshot Placeholder**: IAM Trust Relationships  
-> ![IAM Trust Relationships](screenshots/05-iam-trust-relationships.png)  
-> *Navigate to: IAM Console → Roles → event-agent-role → Trust relationships*
+### The Permissions (I Use Separate Policies for Each Concern)
 
----
+**Lesson I learned the hard way**: Don't dump everything into one giant policy. When something breaks, you want to know which permission is missing without reading 200 lines of JSON.
 
-## Step 2: Attach Permission Policies
-
-### Policy 1: Bedrock Model & Knowledge Base Access
+#### Policy 1: Bedrock Access (so the agent can think)
 
 ```json
 {
@@ -174,10 +141,7 @@ aws iam create-role \
     {
       "Sid": "BedrockModelAccess",
       "Effect": "Allow",
-      "Action": [
-        "bedrock:InvokeModel",
-        "bedrock:InvokeModelWithResponseStream"
-      ],
+      "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
       "Resource": "*"
     },
     {
@@ -196,7 +160,7 @@ aws iam create-role \
 }
 ```
 
-### Policy 2: CloudWatch & CloudTrail for Diagnostics
+#### Policy 2: Observability (so it can diagnose)
 
 ```json
 {
@@ -230,7 +194,9 @@ aws iam create-role \
 }
 ```
 
-### Policy 3: SSM & EC2 for Remediation
+#### Policy 3: Remediation (so it can actually fix things)
+
+This is the scary one. I was nervous giving an AI agent `ec2:RebootInstances` and `ssm:SendCommand`. But that's the whole point — and the system prompt constrains when it uses these.
 
 ```json
 {
@@ -267,38 +233,39 @@ aws iam create-role \
 ```
 
 > 📸 **Screenshot Placeholder**: IAM Role Permissions  
-> ![IAM Role Permissions](screenshots/04-iam-role-permissions.png)  
-> *Navigate to: IAM Console → Roles → event-agent-role → Permissions*
+> ![IAM Permissions](screenshots/04-iam-role-permissions.png)  
+> *All my inline policies — I ended up with 8 of them as the agent grew*
+
+> 📸 **Screenshot Placeholder**: Trust Relationships  
+> ![Trust Relationships](screenshots/05-iam-trust-relationships.png)  
+> *bedrock-agentcore.amazonaws.com as trusted entity*
 
 ---
 
-## Step 3: Agent Code Implementation
+## Writing the Agent Code
 
-### Project Structure
+This is where it gets fun. My project structure looks like this:
 
 ```
 it-ops-agent/
-├── main.py                  # Agent entry point (HTTP server)
-├── agent.py                 # Agent definition and system prompt
+├── main.py            # HTTP server (AgentCore calls this)
+├── agent.py           # Agent brain — system prompt + tools
 ├── tools/
-│   ├── __init__.py
-│   ├── cloudwatch_tools.py  # CloudWatch metrics & alarms
-│   ├── ssm_tools.py         # Systems Manager run commands
-│   ├── ec2_tools.py         # EC2 instance management
-│   ├── log_tools.py         # CloudWatch Logs analysis
-│   ├── sns_tools.py         # SNS notifications
-│   └── kb_tools.py          # Knowledge Base retrieval
+│   ├── cloudwatch_tools.py
+│   ├── ssm_tools.py
+│   ├── ec2_tools.py
+│   ├── log_tools.py
+│   ├── sns_tools.py
+│   └── kb_tools.py
 ├── requirements.txt
-└── buildspec.yml            # CI/CD build specification
+└── buildspec.yml      # CI/CD (more on this later)
 ```
 
-### `main.py` — HTTP Server for AgentCore Runtime
+### `main.py` — The Entry Point
+
+AgentCore Runtime expects an HTTP server on port 8080. When someone invokes my agent, AgentCore sends a POST request to this server. Simple as that.
 
 ```python
-"""
-IT Ops Agent - Main entry point for AgentCore Runtime.
-Exposes an HTTP endpoint that AgentCore routes requests to.
-"""
 import json
 import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -318,21 +285,27 @@ class AgentHandler(BaseHTTPRequestHandler):
             request = json.loads(body)
             prompt = request.get("prompt", "")
             session_id = request.get("session_id", "default")
-            logger.info(f"Received request - session: {session_id}")
+            logger.info(f"Session {session_id}: {prompt[:100]}...")
+
             response = agent(prompt)
+
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            result = {"response": str(response), "session_id": session_id, "status": "success"}
-            self.wfile.write(json.dumps(result).encode())
+            self.wfile.write(json.dumps({
+                "response": str(response),
+                "session_id": session_id,
+                "status": "success"
+            }).encode())
         except Exception as e:
             logger.error(f"Agent error: {e}", exc_info=True)
             self.send_response(500)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"error": str(e), "status": "error"}).encode())
+            self.wfile.write(json.dumps({"error": str(e)}).encode())
 
     def do_GET(self):
+        """Health check — AgentCore pings this."""
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -345,7 +318,9 @@ if __name__ == "__main__":
     server.serve_forever()
 ```
 
-### `agent.py` — Agent Definition with System Prompt
+### `agent.py` — The Brain
+
+The system prompt is everything. I spent more time iterating on this than on the actual tools. The key insight: **tell the agent to diagnose BEFORE it remediates**. Without this, it'll happily reboot your instance without checking if that's actually the problem.
 
 ```python
 from strands import Agent
@@ -357,23 +332,23 @@ from tools.log_tools import search_logs, get_recent_errors
 from tools.sns_tools import send_notification
 from tools.kb_tools import query_runbook
 
-SYSTEM_PROMPT = """You are an expert IT Operations Agent responsible for 
-monitoring, diagnosing, and remediating infrastructure issues on AWS.
+SYSTEM_PROMPT = """You are my IT Operations Agent. You monitor, diagnose, 
+and fix infrastructure issues on AWS.
 
-## Your Capabilities:
-1. **Diagnostics**: Query CloudWatch metrics/alarms, search logs, 
-   check CloudTrail for recent changes
-2. **Remediation**: Execute SSM commands on instances, reboot/stop/start 
-   EC2 instances, modify security groups
-3. **Alerting**: Send SNS notifications to operations teams
-4. **Knowledge**: Query internal runbooks for standard operating procedures
+## What You Can Do:
+1. Query CloudWatch metrics/alarms and search logs
+2. Check CloudTrail for who changed what recently
+3. Run commands on instances via SSM
+4. Reboot/stop/start EC2 instances
+5. Send alerts to our team via SNS
+6. Look up our runbooks in the Knowledge Base
 
-## Operating Principles:
-- Always DIAGNOSE before REMEDIATING
-- Explain your reasoning and findings clearly
-- For destructive actions (reboot, stop), confirm the action and explain why
-- Log all remediation actions taken
-- Escalate to human operators if the issue is outside your capability
+## Rules (IMPORTANT):
+- ALWAYS diagnose before fixing. Don't reboot just because CPU is high.
+- Explain what you found and what you're about to do.
+- For destructive actions (reboot, stop), state WHY you're doing it.
+- After fixing, VERIFY the fix worked.
+- If you're not sure what to do, say so. Don't guess.
 """
 
 
@@ -395,18 +370,29 @@ def create_it_ops_agent() -> Agent:
 
 ---
 
-## Step 4: Package Your Agent Code
+## Deploying to AgentCore Runtime (The Moment of Truth)
+
+Alright, code's written. Now let's get it running in the cloud. Here's the flow:
+
+### Package It Up
 
 ```bash
+# Install deps into a package folder
 pip install -r requirements.txt -t ./package/
+
+# Copy my code in
 cp -r main.py agent.py tools/ package/
+
+# Zip it
 cd package && zip -r ../it-ops-agent.zip . && cd ..
+
+# Upload to S3
 aws s3 cp it-ops-agent.zip s3://event-agent-kb-114805761158/devops-outputs/it-ops-agent.zip
 ```
 
----
+### Create the Runtime
 
-## Step 5: Create the AgentCore Runtime
+This is the command that brought my agent to life:
 
 ```bash
 aws bedrock-agentcore create-agent-runtime \
@@ -421,56 +407,67 @@ aws bedrock-agentcore create-agent-runtime \
   --region us-east-1
 ```
 
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| `network-mode` | PUBLIC | Simplifies connectivity, secured via IAM |
-| `idle-timeout` | 900s (15 min) | Keeps sessions alive for multi-turn diagnostics |
-| `max-lifetime` | 28800s (8 hrs) | Supports long-running incident response |
-| `server-protocol` | HTTP | Standard request/response pattern |
-| `code-runtime` | PYTHON_3_13 | Latest supported Python runtime |
+I waited about 2 minutes, and then:
+
+```
+"runtimeStatus": "READY"
+```
+
+That feeling when your agent goes from code on your laptop to a running service in the cloud — chef's kiss 🤌
+
+### Configuration Choices I Made
+
+| Setting | My Value | Why |
+|---------|----------|-----|
+| Idle timeout | 900s (15 min) | Long enough for multi-turn debugging sessions |
+| Max lifetime | 28800s (8 hrs) | For those really bad outage days |
+| Network | PUBLIC | Simplicity. IAM handles auth. |
+| Protocol | HTTP | Standard REST — nothing fancy |
 
 > 📸 **Screenshot Placeholder**: Runtime Configuration  
 > ![Runtime Configuration](screenshots/02-runtime-configuration.png)  
-> *Navigate to: AgentCore → Runtimes → it_ops_agent_v2 → Configuration*
+> *My runtime config — PUBLIC network, 15 min idle timeout*
 
 ---
 
-## Step 6: Create a Custom Endpoint
+## Custom Endpoints (My "Aha" Moment)
+
+AgentCore gives you a DEFAULT endpoint automatically. But here's the trick I discovered — **create a named endpoint for production**. This way, you can deploy a new version, test it on DEFAULT, and only promote to your named endpoint when you're confident.
 
 ```bash
 aws bedrock-agentcore create-agent-runtime-endpoint \
   --agent-runtime-id "it_ops_agent_v2-Od8Y3L7coD" \
   --name "itOpsEndpoint" \
-  --description "Production endpoint for IT Operations agent"
+  --description "Production endpoint"
 ```
 
-| Endpoint | Version | Status | Purpose |
-|----------|---------|--------|---------|
-| DEFAULT | v6 | READY | Auto-created, always latest |
-| itOpsEndpoint | v6 | READY | Named production endpoint |
+Now I have:
 
-> 💡 **Pro Tip**: Use named endpoints for production traffic and the DEFAULT endpoint for testing.
+| Endpoint | Points To | I Use It For |
+|----------|-----------|--------------|
+| DEFAULT | Latest version | Testing new deploys |
+| itOpsEndpoint | Stable version | Production traffic |
 
-> 📸 **Screenshot Placeholder**: Endpoints Tab  
-> ![Endpoints Tab](screenshots/03-endpoints-tab.png)  
-> *Navigate to: AgentCore → Runtimes → it_ops_agent_v2 → Endpoints*
+> 📸 **Screenshot Placeholder**: Endpoints  
+> ![Endpoints](screenshots/03-endpoints-tab.png)  
+> *Both endpoints READY, both on v6*
 
 ---
 
-## Step 7: Version History & Rollback
+## The Version Story (6 Versions in One Day)
 
-Each update creates a new **immutable version**:
+Here's something I love about AgentCore — every update creates a new **immutable version**. You can never "break" a previous version. My first day of development looked like this:
 
-| Version | Deployed | Changes |
-|---------|----------|---------|
-| v1 | Mar 31, 12:48 UTC | Initial deployment - basic diagnostics |
-| v2 | Mar 31, 12:58 UTC | Added SSM run command tools |
-| v3 | Mar 31, 14:30 UTC | Added EC2 management capabilities |
-| v4 | Mar 31, 17:06 UTC | Added Knowledge Base integration |
-| v5 | Mar 31, 17:20 UTC | Improved error handling |
-| v6 | Mar 31, 18:15 UTC | Added SNS alerting, EKS support |
+| Version | Time | What I Did |
+|---------|------|------------|
+| v1 | 12:48 PM | Basic agent — could only describe alarms |
+| v2 | 12:58 PM | Added SSM tools — now it can run commands! |
+| v3 | 2:30 PM | EC2 management — reboot, stop, start |
+| v4 | 5:06 PM | Connected Knowledge Base for runbook lookup |
+| v5 | 5:20 PM | Fixed error handling (agent was crashing on empty responses) |
+| v6 | 6:15 PM | Added SNS alerting + EKS read access |
 
-### Rollback Command
+If v6 had a bug? One command to go back:
 
 ```bash
 aws bedrock-agentcore update-agent-runtime-endpoint \
@@ -479,31 +476,40 @@ aws bedrock-agentcore update-agent-runtime-endpoint \
   --agent-runtime-version "5"
 ```
 
+Instant rollback. No downtime. This saved me at least twice.
+
 > 📸 **Screenshot Placeholder**: Version History  
-> ![Version History](screenshots/06-version-history.png)  
-> *Navigate to: AgentCore → Runtimes → it_ops_agent_v2 → Versions*
+> ![Versions](screenshots/06-version-history.png)  
+> *All 6 versions — each one immutable, each one rollback-able*
 
 ---
 
-## Part 4: CI/CD Pipeline for Continuous Agent Deployment
+## Automating Deployments (Because I'm Lazy in the Best Way)
 
-### Pipeline Architecture
+After deploying 6 versions manually on day one, I knew I needed CI/CD. The manual process was:
+
+1. Zip the code → 2. Upload to S3 → 3. Update runtime → 4. Wait for READY → 5. Update endpoint
+
+Five steps that I was doing multiple times a day. No thanks. Let me show you the pipeline I built.
+
+### The Pipeline Flow
 
 ```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  CodeCommit  │────▶│  CodeBuild   │────▶│  S3 Upload   │────▶│  AgentCore   │
-│  (Source)    │     │  (Build &    │     │  (Artifact)  │     │  (Deploy)    │
-│              │     │   Test)      │     │              │     │              │
-└──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
-       │                    │                    │                     │
-       │ git push           │ pip install        │ it-ops-agent.zip   │ update-runtime
-       │ to main            │ pytest             │                     │ update-endpoint
-       ▼                    ▼                    ▼                     ▼
-  Triggers           Runs unit tests       Stores versioned       Creates new
-  pipeline           Packages code         artifact in S3         immutable version
+git push → EventBridge detects it → CodePipeline kicks off → CodeBuild runs:
+  ├── Install deps
+  ├── Run tests
+  ├── Package zip
+  ├── Upload to S3
+  ├── Update AgentCore Runtime
+  ├── Wait for READY
+  └── Update production endpoint
 ```
 
-### `buildspec.yml`
+Now deploying is just: `git push origin main`. Done.
+
+### My `buildspec.yml`
+
+This is the heart of my CI/CD. CodeBuild runs this on every push:
 
 ```yaml
 version: 0.2
@@ -526,7 +532,7 @@ phases:
 
   pre_build:
     commands:
-      - echo "Running unit tests..."
+      - echo "Running tests first — I don't ship broken code to prod"
       - python -m pytest tests/ -v --tb=short
 
   build:
@@ -547,10 +553,12 @@ phases:
           --code-runtime "PYTHON_3_13" \
           --network-mode "PUBLIC"
       - |
+        echo "Waiting for runtime to be READY..."
         for i in $(seq 1 30); do
           STATUS=$(aws bedrock-agentcore get-agent-runtime \
             --agent-runtime-id ${RUNTIME_ID} \
             --query 'runtimeStatus' --output text)
+          echo "  Attempt $i: $STATUS"
           if [ "$STATUS" = "READY" ]; then break; fi
           sleep 10
         done
@@ -558,45 +566,17 @@ phases:
         LATEST_VERSION=$(aws bedrock-agentcore get-agent-runtime \
           --agent-runtime-id ${RUNTIME_ID} \
           --query 'agentRuntimeVersion' --output text)
+        echo "Promoting version $LATEST_VERSION to production"
         aws bedrock-agentcore update-agent-runtime-endpoint \
           --agent-runtime-id ${RUNTIME_ID} \
           --endpoint-name ${ENDPOINT_NAME} \
           --agent-runtime-version ${LATEST_VERSION}
-      - echo "Deployment complete ✓"
+      - echo "✅ Deployed!"
 ```
 
-### CodePipeline Definition
+### The EventBridge Trigger (Auto-Deploy on Push)
 
-```json
-{
-  "pipeline": {
-    "name": "it-ops-agent-pipeline",
-    "roleArn": "arn:aws:iam::114805761158:role/codepipeline-it-ops-agent-role",
-    "stages": [
-      {
-        "name": "Source",
-        "actions": [{
-          "name": "SourceAction",
-          "actionTypeId": {"category": "Source", "owner": "AWS", "provider": "CodeCommit", "version": "1"},
-          "configuration": {"RepositoryName": "it-ops-agent", "BranchName": "main"},
-          "outputArtifacts": [{"name": "SourceOutput"}]
-        }]
-      },
-      {
-        "name": "Build-Test-Deploy",
-        "actions": [{
-          "name": "BuildAndDeploy",
-          "actionTypeId": {"category": "Build", "owner": "AWS", "provider": "CodeBuild", "version": "1"},
-          "configuration": {"ProjectName": "it-ops-agent-build"},
-          "inputArtifacts": [{"name": "SourceOutput"}]
-        }]
-      }
-    ]
-  }
-}
-```
-
-### EventBridge Auto-Trigger
+I set up EventBridge to watch my CodeCommit repo and trigger the pipeline:
 
 ```bash
 aws events put-rule \
@@ -608,127 +588,176 @@ aws events put-rule \
   }'
 ```
 
-### Day-to-Day Deployment Workflow
+### Blue-Green Deployment (For When I'm Nervous)
+
+For bigger changes, I don't auto-promote. Instead:
 
 ```bash
-# Make changes → commit → push → done!
-git add . && git commit -m "feat: add disk cleanup tool" && git push origin main
-# Pipeline: detect → test → package → deploy → update endpoint (automatic)
+# 1. Push code (DEFAULT endpoint gets new version)
+# 2. Test it manually on DEFAULT
+aws bedrock-agentcore invoke-agent-runtime \
+  --agent-runtime-arn "..." --qualifier "DEFAULT" \
+  --payload '{"prompt": "Health check — describe all active alarms"}'
+
+# 3. If it works, promote to production
+aws bedrock-agentcore update-agent-runtime-endpoint \
+  --agent-runtime-id "it_ops_agent_v2-Od8Y3L7coD" \
+  --endpoint-name "itOpsEndpoint" \
+  --agent-runtime-version "7"
+
+# 4. Oh no, it's broken? Instant rollback.
+aws bedrock-agentcore update-agent-runtime-endpoint \
+  --agent-runtime-id "it_ops_agent_v2-Od8Y3L7coD" \
+  --endpoint-name "itOpsEndpoint" \
+  --agent-runtime-version "6"
 ```
 
-> 📸 **Screenshot Placeholder**: CodePipeline Overview  
+> 📸 **Screenshot Placeholder**: CodePipeline  
 > ![CodePipeline](screenshots/08-codepipeline-overview.png)  
-> *Navigate to: CodePipeline → Pipelines → it-ops-agent-pipeline*
+> *Source → Build-Test-Deploy — all green, all happy*
 
 > 📸 **Screenshot Placeholder**: CodeBuild Logs  
-> ![CodeBuild Logs](screenshots/09-codebuild-logs.png)  
-> *Navigate to: CodeBuild → it-ops-agent-build → Latest build*
+> ![CodeBuild](screenshots/09-codebuild-logs.png)  
+> *Build logs showing tests passing, deploy succeeding*
+
+> 📸 **Screenshot Placeholder**: EventBridge Trigger  
+> ![EventBridge](screenshots/10-eventbridge-trigger.png)  
+> *The rule that watches my repo and kicks off the pipeline*
 
 ---
 
-## Testing the Agent
+## Does It Actually Work? (Testing)
 
-### Test Scenario 1: CloudWatch Alarm Diagnosis
+Let me show you what it looks like when I talk to my agent:
 
-```bash
-aws bedrock-agentcore invoke-agent-runtime \
-  --agent-runtime-arn "arn:aws:bedrock-agentcore:us-east-1:114805761158:runtime/it_ops_agent_v2-Od8Y3L7coD" \
-  --qualifier "itOpsEndpoint" \
-  --payload '{"prompt": "Are there any CloudWatch alarms in ALARM state? Investigate root cause."}' \
-  --runtime-session-id "test-diag-001"
-```
-
-### Test Scenario 2: Instance Remediation
+### "Hey, anything broken?"
 
 ```bash
 aws bedrock-agentcore invoke-agent-runtime \
   --agent-runtime-arn "arn:aws:bedrock-agentcore:us-east-1:114805761158:runtime/it_ops_agent_v2-Od8Y3L7coD" \
   --qualifier "itOpsEndpoint" \
-  --payload '{"prompt": "Instance i-0abc123def has 95% memory. Find the process and restart it."}' \
-  --runtime-session-id "test-remediate-001"
+  --payload '{"prompt": "Any CloudWatch alarms firing right now? Investigate."}' \
+  --runtime-session-id "morning-check-001"
 ```
 
-### Test Scenario 3: Multi-Turn Conversation
+The agent will:
+1. Call `get_alarms` — finds 2 alarms in ALARM state
+2. Pull metric data for each — sees CPU spiked to 98% after a deploy
+3. Check CloudTrail — finds a CodeDeploy event 10 minutes before the spike
+4. Correlate — "CPU spike began right after deployment X. Likely a regression."
+5. Recommend — "Should I rollback the deployment?"
+
+### "That instance is dying, fix it"
+
+```bash
+aws bedrock-agentcore invoke-agent-runtime \
+  --agent-runtime-arn "arn:aws:bedrock-agentcore:us-east-1:114805761158:runtime/it_ops_agent_v2-Od8Y3L7coD" \
+  --qualifier "itOpsEndpoint" \
+  --payload '{"prompt": "i-0abc123def is at 95% memory. Find whats eating it and restart that service."}' \
+  --runtime-session-id "remediate-001"
+```
+
+The agent:
+1. Runs `ps aux --sort=-%mem | head -20` via SSM
+2. Finds `java` eating 8GB — it's the app server
+3. Runs `systemctl restart tomcat` via SSM
+4. Waits 30 seconds, checks memory again — down to 45%
+5. Sends SNS: "Fixed high memory on i-0abc123def — restarted tomcat"
+
+### Multi-Turn Conversations (This is Why AgentCore > Lambda)
 
 ```python
 import boto3, json
 
 client = boto3.client("bedrock-agentcore", region_name="us-east-1")
-session = "multi-turn-001"
+session = "incident-friday-night"
 arn = "arn:aws:bedrock-agentcore:us-east-1:114805761158:runtime/it_ops_agent_v2-Od8Y3L7coD"
 
-# Turn 1
+# Me: "what's wrong?"
 r1 = client.invoke_agent_runtime(agentRuntimeArn=arn, qualifier="itOpsEndpoint",
-    payload=json.dumps({"prompt": "Show EC2 instances with status check failures"}),
+    payload=json.dumps({"prompt": "Show me instances with status check failures"}),
     runtimeSessionId=session)
 
-# Turn 2 (same session — agent remembers context)
+# Me: "fix the first one" (agent REMEMBERS the previous context!)
 r2 = client.invoke_agent_runtime(agentRuntimeArn=arn, qualifier="itOpsEndpoint",
-    payload=json.dumps({"prompt": "Reboot the first failed instance and notify team via SNS"}),
+    payload=json.dumps({"prompt": "Reboot the first one and notify the team"}),
     runtimeSessionId=session)
 ```
 
----
-
-## Operational Metrics & Monitoring
-
-| Metric | Source | Alert Threshold |
-|--------|--------|-----------------|
-| Agent response latency | CloudWatch | > 30 seconds |
-| Session idle timeouts | CloudWatch Logs | > 10 per hour |
-| Tool execution failures | Application logs | Any |
-| Runtime restarts | AgentCore events | > 2 per day |
+The session persistence is *magic*. The agent remembers what it found in turn 1 when I ask it to act in turn 2.
 
 ---
 
-## Lessons Learned
+## What I Learned (The Hard Way)
 
-1. **Session Management Matters** — The 15-minute idle timeout works well for incident response.
-2. **Immutable Versions Are Your Safety Net** — 6 versions in one day; instant rollback saved us.
-3. **Tool Design is Critical** — Keep tools atomic. Don't combine "check + fix" into one tool.
-4. **System Prompt Engineering** — The prompt IS your agent's SOP. Iterate heavily.
-5. **Start Read-Only, Add Write Later** — v1-v3 were diagnostics-only, v4-v6 added remediation.
+### 1. 🧠 The System Prompt Is Your Most Important Code
+
+I rewrote it 4 times. The biggest improvement was adding "ALWAYS diagnose before remediating." Without that, the agent would see high CPU and immediately reboot the instance. That's not smart — that's just a cron job with extra steps.
+
+### 2. 🔄 Immutable Versions Saved My Butt
+
+Version 4 had a bug where the agent would crash if CloudWatch returned zero data points. I noticed it within 5 minutes and rolled back to v3 with one command. Zero downtime. Zero panic.
+
+### 3. 🔨 Keep Tools Atomic
+
+Early on, I had a tool called `diagnose_and_fix()`. Terrible idea. When something went wrong, I couldn't tell if the diagnosis failed or the fix failed. Now each tool does ONE thing. `get_alarms()`, `run_ssm_command()`, `send_notification()`. Clean, debuggable, composable.
+
+### 4. 📊 Start Read-Only, Then Add Write Permissions
+
+My progression: v1-v3 could only *look* at things. Once I trusted the agent's judgment (after watching it diagnose correctly 50+ times), I gave it remediation powers in v4-v6. I'd recommend this approach to anyone building AIOps agents.
+
+### 5. ⏱️ The 15-Minute Idle Timeout Is Perfect
+
+Long enough for me to read the agent's diagnosis, think about it, and tell it what to do next. Short enough that I'm not paying for idle sessions overnight.
 
 ---
 
-## Cost Considerations
+## What It Costs Me
 
-| Component | Estimated Monthly Cost |
-|-----------|----------------------|
-| AgentCore Runtime (sessions) | Pay per session duration — free when idle |
-| Bedrock Claude 3.5 Sonnet v2 | ~$3/1M input, ~$15/1M output tokens |
-| S3 storage (artifacts) | < $1 |
-| CodeBuild (CI/CD) | ~$5 (10 builds/month) |
-| CloudWatch Logs | Based on volume |
+Let's be real — everyone wants to know this:
+
+| What | Monthly Cost | Notes |
+|------|-------------|-------|
+| AgentCore Runtime | Pay-per-session | I only pay when it's actually working. $0 when idle. |
+| Claude 3.5 Sonnet v2 | ~$20-50 | Depends on incident volume. ~$3/1M input tokens |
+| S3 (artifacts) | < $1 | One zip file, lol |
+| CodeBuild | ~$5 | 10 builds/month at 5 min each |
+| Total | **~$30-60/month** | Way cheaper than me being on-call at 3 AM |
+
+The ROI is insane. One incident that used to take me 30 minutes now takes the agent 60 seconds.
 
 ---
 
-## Conclusion
+## What's Next for My Agent
 
-We've built a production-grade IT Operations Agent that:
+I'm not done. Here's my roadmap:
 
-✅ **Diagnoses** infrastructure issues using CloudWatch, CloudTrail, and application logs  
-✅ **Remediates** common problems via SSM commands and EC2 management  
-✅ **Evolves** through immutable versions with instant rollback capability  
-✅ **Deploys automatically** through a CI/CD pipeline triggered by code pushes  
-✅ **Scales** with AgentCore Runtime's session-based compute model  
+- **🚨 EventBridge auto-trigger** — When a CloudWatch alarm fires, automatically invoke the agent instead of waiting for me to notice
+- **🤝 Multi-agent collaboration** — I have an `observability_rca_agent` that does deep root cause analysis. I want them to talk to each other
+- **✋ Human approval for scary stuff** — Before the agent reboots production, it should Slack me and wait for 👍
+- **🧠 AgentCore Memory** — Store what the agent learns from incidents so it gets smarter over time
 
-### What's Next
+---
 
-- **EventBridge integration**: Auto-trigger agent when CloudWatch alarms fire
-- **Multi-agent orchestration**: Connect with `observability_rca_agent` for deeper RCA
-- **Approval workflows**: Human-in-the-loop for destructive remediation
-- **Memory integration**: AgentCore Memory for long-term incident knowledge
+## Wrapping Up
+
+I built this in a day. Literally — version 1 at 12:48 PM, version 6 by 6:15 PM. AgentCore Runtime made it shockingly easy to go from Python script to production service.
+
+If you're drowning in operational incidents and you keep fixing the same things over and over — build an agent. Give it eyes (CloudWatch), hands (SSM), and a brain (Claude). Deploy it on AgentCore. Set up CI/CD so you can iterate fast.
+
+My mornings are different now. I still check Slack, but instead of 15 unresolved alerts, I see messages from my agent: *"Fixed high memory on i-0abc123. Restarted tomcat. Verified memory dropped to 45%. Notified team."*
+
+That's the dream, right?
 
 ---
 
 ## Resources
 
-- [Amazon Bedrock AgentCore Documentation](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/)
+- [Amazon Bedrock AgentCore Docs](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/)
 - [Strands Agents Framework](https://github.com/strands-agents/strands-agents)
 - [AWS Systems Manager Run Command](https://docs.aws.amazon.com/systems-manager/latest/userguide/run-command.html)
-- [AgentCore Runtime CLI Reference](https://docs.aws.amazon.com/cli/latest/reference/bedrock-agentcore/)
+- [My GitHub Repo](https://github.com/catchmeraman/blog-it-ops-agent)
 
 ---
 
-*Published by the AIOps Engineering Team | Built on Amazon Bedrock AgentCore Runtime*
+*Built with ☕ and frustration by someone who was tired of being a human runbook.*
