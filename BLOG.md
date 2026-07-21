@@ -81,7 +81,7 @@ I know, I know — "private is safer." But for my use case, IAM authentication s
 | AgentCore Runtime access | It's in the Bedrock console |
 | Python 3.12+ | For the agent code |
 | AWS CLI v2 | For deploying |
-| An S3 bucket | I used `event-agent-kb-114805761158` |
+| An S3 bucket | I used `event-agent-kb-<account-id>` |
 | Some EC2 instances to manage | So the agent has something to work with |
 
 > 📸 **Screenshot Placeholder**: AgentCore Runtime Dashboard  
@@ -387,7 +387,7 @@ cp -r main.py agent.py tools/ package/
 cd package && zip -r ../it-ops-agent.zip . && cd ..
 
 # Upload to S3
-aws s3 cp it-ops-agent.zip s3://event-agent-kb-114805761158/devops-outputs/it-ops-agent.zip
+aws s3 cp it-ops-agent.zip s3://event-agent-kb-<account-id>/devops-outputs/it-ops-agent.zip
 ```
 
 ### Create the Runtime
@@ -397,9 +397,9 @@ This is the command that brought my agent to life:
 ```bash
 aws bedrock-agentcore create-agent-runtime \
   --agent-runtime-name "it_ops_agent_v2" \
-  --role-arn "arn:aws:iam::114805761158:role/event-agent-role" \
+  --role-arn "arn:aws:iam::<account-id>:role/event-agent-role" \
   --network-mode "PUBLIC" \
-  --code-s3-bucket "event-agent-kb-114805761158" \
+  --code-s3-bucket "event-agent-kb-<account-id>" \
   --code-s3-prefix "devops-outputs/it-ops-agent.zip" \
   --code-entry-point "main.py" \
   --code-runtime "PYTHON_3_13" \
@@ -517,9 +517,9 @@ version: 0.2
 env:
   variables:
     RUNTIME_ID: "it_ops_agent_v2-Od8Y3L7coD"
-    S3_BUCKET: "event-agent-kb-114805761158"
+    S3_BUCKET: "event-agent-kb-<account-id>"
     S3_KEY: "devops-outputs/it-ops-agent.zip"
-    ROLE_ARN: "arn:aws:iam::114805761158:role/event-agent-role"
+    ROLE_ARN: "arn:aws:iam::<account-id>:role/event-agent-role"
     ENDPOINT_NAME: "itOpsEndpoint"
 
 phases:
@@ -634,7 +634,7 @@ Let me show you what it looks like when I talk to my agent:
 
 ```bash
 aws bedrock-agentcore invoke-agent-runtime \
-  --agent-runtime-arn "arn:aws:bedrock-agentcore:us-east-1:114805761158:runtime/it_ops_agent_v2-Od8Y3L7coD" \
+  --agent-runtime-arn "arn:aws:bedrock-agentcore:us-east-1:<account-id>:runtime/it_ops_agent_v2-Od8Y3L7coD" \
   --qualifier "itOpsEndpoint" \
   --payload '{"prompt": "Any CloudWatch alarms firing right now? Investigate."}' \
   --runtime-session-id "morning-check-001"
@@ -651,7 +651,7 @@ The agent will:
 
 ```bash
 aws bedrock-agentcore invoke-agent-runtime \
-  --agent-runtime-arn "arn:aws:bedrock-agentcore:us-east-1:114805761158:runtime/it_ops_agent_v2-Od8Y3L7coD" \
+  --agent-runtime-arn "arn:aws:bedrock-agentcore:us-east-1:<account-id>:runtime/it_ops_agent_v2-Od8Y3L7coD" \
   --qualifier "itOpsEndpoint" \
   --payload '{"prompt": "i-0abc123def is at 95% memory. Find whats eating it and restart that service."}' \
   --runtime-session-id "remediate-001"
@@ -671,7 +671,7 @@ import boto3, json
 
 client = boto3.client("bedrock-agentcore", region_name="us-east-1")
 session = "incident-friday-night"
-arn = "arn:aws:bedrock-agentcore:us-east-1:114805761158:runtime/it_ops_agent_v2-Od8Y3L7coD"
+arn = "arn:aws:bedrock-agentcore:us-east-1:<account-id>:runtime/it_ops_agent_v2-Od8Y3L7coD"
 
 # Me: "what's wrong?"
 r1 = client.invoke_agent_runtime(agentRuntimeArn=arn, qualifier="itOpsEndpoint",
